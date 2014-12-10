@@ -1,0 +1,113 @@
+#!/bin/sh
+#####################################################################
+# nmon_trace                                                        #
+# Saves nmon data logging output and generates datafiles for munin  #
+# cs@brnfck.at 2012.08.21                                           #
+# @(#)version 1.2  (c) cs@brnfck.at 2012.12.27"                     #
+#####################################################################
+# ChangeHistory                                                     #
+# cs 1.0 - 1.2  Delete files older than 30 days                     #
+# cs 1.0 - 1.2  Now compressing output files (about 300K/day)       #
+# cs 0.9 - 1.0  Icinga output, awk splitted, disk output added      #
+# cs 0.8 - 0.9  Added munin output (test)                           #
+# cs 0.7 - 0.8  Added network, paging, io-adapter output            #
+# cs     - 0.7  Initial release                                     #
+#####################################################################
+# ToDo's                                                            #
+# *) Add logic for disk statistics                                  #
+# *) Build wrapper to swap nmon-file on new nmon_trace run          #
+# *) Add description of metrics for munin plugin                    #
+# *) Output data to files for munin plugin                          #
+#####################################################################
+
+# Environment
+PREFIX=/opt/nmon_trace
+BINDIR=${PREFIX}/bin
+PIPEDIR=${PREFIX}/var
+WORKDIR=${PREFIX}/data
+TMPDIR=${PREFIX}/tmp
+FINALDIR=${PREFIX}/icinga_out
+
+# For how long should files be kept
+KEEP=30
+
+# AWK Skript to use
+NMONAWK=${BINDIR}/nmon_trace.awk
+
+# Generate timestamp for filename, pipe, ...
+TSTAMP=$(date "+%y%m%d_%H%M")
+
+# Needed variables
+# Which pipe to use
+PIPE=${PIPEDIR}/.pipe_${TSTAMP}
+TMPDIR=${PREFIX}/tmp_${TSTAMP}
+
+# Filename to save nmon output
+FNAM=$(hostname)_${TSTAMP}.nmon
+
+# Get start time to calculate needed intervals
+STARTH=$(date "+%H")
+STARTM=$(date "+%M")
+COUNT=$(echo "1440 $STARTH 60 * $STARTM + 2 + - 1 / p" |dc)
+
+# nmon parameters
+INTERVAL=60
+
+# Checking pipe
+if [ -p ${PIPE} ]
+then
+	echo ERROR ${PIPE} already exists... >&2
+	exit 1
+fi
+
+# Checking temporary directory
+if [ -d ${TMPDIR} ]
+then
+	echo ERROR ${TMPDIR} already exists... >&2
+	exit 1
+fi
+mkdir ${TMPDIR}
+
+# Cleanup in every other case
+rm ${PIPE} >/dev/null 2>&1
+rm ${TMPDIR}/* >/dev/null 2>&1
+
+# Create the pipe
+mkdir -p ${PIPEDIR}
+mknod ${PIPE} p
+
+# Start nmon data loggin and save PID for later
+nmon -m${WORKDIR} -F${FNAM} -TdP^O -s${INTERVAL} -c${COUNT}
+NMON_PID=$!
+
+# Attach to logfile and send to pipe (in background)
+tail -50000f ${WORKDIR}/${FNAM} >${PIPE} &
+
+# Save PID for later
+TAIL_PID=$!
+
+# Sleep to make sure everything is working
+sleep 5
+
+# Start parsing output of nmon (via pipe)
+awk -v TAIL_PID=${TAIL_PID} -v TMPDIR=${TMPDIR} -v FINALDIR=${FINALDIR} -F, -f ${NMONAWK} ${PIPE}
+
+echo DEBUG: awk finished
+# awk is finished, sleep 5 seconds then start cleanup
+sleep 5
+
+# Move files to final destination
+mv ${TMPDIR}/* ${FINALDIR} >/dev/null 2>&1
+
+# compress file (all uncompressed files to cleanup historical files)
+find ${WORKDIR} -name "*.nmon" -mtime +1 -exec gzip -9 {} \;
+
+# Cleanup
+fuser -k ${PIPE} >/dev/null 2>&1
+rm ${PIPE} >/dev/null 2>&1
+rm -rf ${TMPDIR} >/dev/null 2>&1
+
+# Remove data files older than KEEP days
+find ${WORKDIR} -type f -mtime +${KEEP} -exec rm {} \;
+
+exit 0
